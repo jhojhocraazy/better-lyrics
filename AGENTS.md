@@ -1,156 +1,93 @@
-# AGENTS.md
+# AGENTS.md — Diretriz local de localização: better-lyrics
 
-Operating notes for AI agents working in this repo. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the
-code guidelines (imports, DOM safety, logging, comment style) — they are enforced in review and not
-repeated here.
+> **Herança obrigatória.** Toolchain, gates de CI, política de PR e convenções de código estão em
+> [`AGENTS.upstream.md`](./AGENTS.upstream.md). Leia-o antes de qualquer mudança que não seja texto.
+> Este arquivo governa **apenas** decisões semânticas de idioma; em caso de conflito sobre build, o
+> upstream vence.
 
-## Toolchain
+## 1. Domínio
 
-- Node `>=22.12` (CI pins 22.x). `node_modules` is not shared between git worktrees — run
-  `npm install` in each one.
-- Build is [extension.js](https://extension.js.org) (`extension` CLI) over rspack. All build
-  customisation lives in `extension.config.js`, not in a webpack/rspack config file.
-- `manifest.json` uses extension.js browser-prefixed keys (`chrome:key`, `chromium:background`,
-  `gecko:background`, `edge:key`). The prefix is resolved per `--browser` target, so a key without a
-  prefix applies everywhere.
-- Formatting and linting are Biome only. Prettier is explicitly disabled.
+Extensão de navegador (Chromium e Firefox) que lê o estado do player do YouTube Music e injeta letras
+em tempo real sobre a interface, com página de opções, popup e escolha de fontes de letras.
 
-## Running the extension
+O usuário é alguém ouvindo música enquanto trabalha: ele não "configura um plugin", ele quer a linha
+certa destacada no segundo certo. Texto de UI aqui compete com a música por atenção — frases longas
+são perdidas.
 
-`npm run dev` launches Chrome on YouTube Music with a persistent managed profile under
-`dist/extension-js/profiles/`. Google rejects new sign-ins while `dev` holds the remote-debugging
-transport, so to authenticate a fresh profile run `npm run start` once (no CDP transport), sign in,
-quit, then use `npm run dev`. `dev:firefox` and `dev:brave` / `start:brave` target the other
-browsers.
+## 2. Onde o texto vive (verificado no clone)
 
-## The locale codegen step
+| Caminho | Papel | Tratamento |
+| --- | --- | --- |
+| `_locales/en/messages.json` | fonte semântica de verdade | referência primária |
+| `_locales/pt_BR/messages.json` | 643 chaves, ~115 KB, já publicado | baseline **auditável**, não dogma |
+| `_locales/<outros>/messages.json` | demais idiomas | fora de escopo |
+| `src/core/generated/locales.ts` | gerado a partir de `_locales/` | nunca editar à mão |
+| `manifest.json` | `name` / `description` da extensão | limite de 132 caracteres na Chrome Web Store |
+| `public/css/themes/` | temas, sem texto | fora de escopo |
 
-`src/core/generated/locales.ts` is generated from the `_locales/` directory tree. Every npm script
-that touches types or builds runs `generate:locales` first. If you invoke `tsc`, `tsx`, or the
-`extension` CLI directly, run `npm run generate:locales` yourself or typecheck will fail on a missing
-module.
+## 3. Protocolo de inferência semântica
 
-## Verification gates
+Nenhum termo é decidido por dicionário. A sequência é obrigatória:
 
-Run these before claiming work is done; they are what CI checks:
+1. **Localizar o consumo.** `grep` pela chave em `src/` para ver o componente, o espaço disponível e
+   o que está ao redor. String sem contexto de renderização não é traduzível com segurança.
+2. **Classificar o campo.** Rótulo de ação, estado do player, mensagem de erro, metadado de loja ou
+   nome de formato técnico. Cada classe tem registro próprio: ação no infinitivo, estado descritivo,
+   erro acionável.
+3. **Inferir o eixo semântico.** Muitas chaves são posições num eixo, não palavras. Antes de verter um
+   estado, identifique o eixo pelos irmãos no JSON e pelo componente consumidor (tempo? versão?
+   disponibilidade? etapa do fluxo?). Traduzir a palavra isolada é o erro mais caro do projeto.
+4. **Buscar evidência externa.** Como o próprio YouTube Music em pt-BR nomeia o mesmo conceito na
+   tela correspondente? Como players concorrentes (Spotify, Deezer) nomeiam? Cite a fonte no
+   relatório — "soa melhor" não é evidência.
+5. **Testar naturalidade.** Leia como um brasileiro leria de passagem, não como revisor. Se a frase
+   só faz sentido porque o inglês está por trás, reescreva.
+6. **Registrar.** Toda decisão entra no handoff com alternativa rejeitada e motivo (seção 8).
 
-```bash
-npm run typecheck   # tsc --noEmit
-npm run selfcheck   # the test suite (see below)
-npm run lint        # biome lint --write + format --write; rewrites files in place
-npm run knip        # unused exports/deps/files
-npm run build       # full multi-browser build
-```
+## 4. Invariantes técnicas
 
-Also available: `npm run check:i18n-brand` (protected product terms must survive translation
-verbatim), `npm run build:ci` (adds sourcemap patching + R2 upload), `npm run knip:fix`.
+- Chaves JSON, `$PLACEHOLDER$`, `{0}`, `%s`, URLs e nomes de arquivo permanecem byte a byte.
+- Marcas e formatos não se traduzem: `YouTube Music`, `Spotify`, `Apple Music`, nomes de formato de
+  letra e nomes de provedor.
+- `messages.json` mantém a indentação de 2 espaços e a ordem das chaves.
+- O conjunto de 643 chaves não muda de tamanho sem atualização do `en`.
+- Nada de HTML ou markdown novo dentro de string que não tinha.
 
-`tooling/check-packaged-hdr-theme.ts` asserts against `dist/` and is deliberately *not* part of
-`selfcheck` — run `npm run build` first, then `npx tsx tooling/check-packaged-hdr-theme.ts`.
+## 5. Critérios de aceitação
 
-## Tests are self-checks
+- Rótulo de opção ≤ 32 caracteres; descrição ≤ 120; descrição da store ≤ 132.
+- Caixa de frase, sem ponto final em botão; zero gerúndio em ação.
+- Consistência dentro do arquivo: o mesmo conceito tem sempre a mesma palavra.
+- Zero decalque: nenhuma frase que só exista para espelhar a sintaxe inglesa.
+- Acentuação completa; nenhum "nao", "voce" ou "musica".
 
-There is no test runner. `npm run selfcheck` discovers every `**/*.selfcheck.ts` under `src/` and
-`tooling/` and executes each as a standalone `tsx` script; a non-zero exit fails the run. They use
-`node:assert/strict`, and `jsdom` plus hand-rolled fake clocks for anything DOM- or timer-shaped.
+## 6. Proibições
 
-### Do not write new self-checks by default
+- Verter chave de estado ou termo técnico pela primeira acepção do dicionário, sem passar pelos passos
+  2 e 3.
+- Criar termo que nenhuma plataforma brasileira usa, ainda que seja "mais correto".
+- Traduzir marca, nome de formato ou identificador de código.
+- Editar `src/core/generated/locales.ts`.
+- Tratar `_locales/pt_BR` como intocável ou como verdade: ele é baseline a auditar, e qualquer
+  alteração nele exige justificativa registrada.
 
-There are already 53 of them and they cover the invariants that actually break. Every one is a
-separate `tsx` process in CI, and a test that restates its implementation costs real time on every
-run while proving nothing. **Adding coverage is not part of "finishing" a change here.** Ship the
-change, run the gates, and leave the suite alone.
-
-Write a self-check only when one of these is true:
-
-- The maintainer asked for one.
-- You are fixing a bug whose cause was a non-obvious logic error, and a single assertion pins that
-  exact regression.
-- You are adding genuinely tricky *pure* logic — a parser, a timing/offset calculation, a state
-  machine, a merge or sort — where the invariant cannot be confirmed by reading the function.
-
-Never write one for: thin wrappers and delegation, DOM construction or event wiring, constants and
-config plumbing, anything `tsc` already proves, or a case whose expected value you derived by running
-the code. If a self-check is warranted, prefer extending the nearest existing `.selfcheck.ts` over
-creating a new file, and prefer one assertion that states the invariant over a table of cases that
-enumerate the implementation.
-
-If you believe something needs coverage and it does not clearly fit above, say what you would assert
-and why in your summary and let the maintainer call it. Do not write it speculatively.
-
-Mechanics, when you do write one: keep it pure — a self-check needing the browser, the network, or a
-build artifact does not belong in the discovered set. No `knip.json` change is needed, as
-`src/**/*.selfcheck.ts` is already an entry glob (new *application* entrypoints do need adding there).
-
-## The UI guard ratchet
-
-`tooling/ui-guards.selfcheck.ts` regex-scans `src/` and `pages/` and enforces a `KNOWN` baseline of
-per-file violation counts. It asserts in **both** directions: exceeding a count fails, and dropping
-below it also fails and tells you to lower the number (deleting the entry at zero). Expect to edit
-`KNOWN` when you clean a file up.
-
-Rules, with the pattern logic in `tooling/uiGuardRules.ts`: no native `<select>` outside `src/ui/`,
-no `text-transform: uppercase` in CSS, no raw `font-size` outside `src/ui/tokens.css`, no raw
-white/alpha colour literals outside `src/ui/`, no dark translucent field wells. The intended fix is
-always a `src/ui/` primitive or a `src/ui/tokens.css` variable, never a local workaround.
-
-For size work there is an on-demand (not gated, no committed baseline) reporter over a built `dist/`:
+## 7. Verificação
 
 ```bash
-npx tsx tooling/bundle-sizes.ts dist/chrome --save=sizes.json   # record
-npx tsx tooling/bundle-sizes.ts dist/chrome --compare=sizes.json # diff, plus byte-identical chunks
+npm run generate:locales    # após qualquer mudança em _locales/
+npm run typecheck
+npm run check:i18n-brand    # falha se termo protegido for traduzido
+npm run lint
 ```
 
-## The renderer lives elsewhere
+Valide o JSON com parser nativo antes de considerar pronto; vírgula sobrando derruba a extensão
+inteira em runtime, não só a string.
 
-The lyrics renderer, highlight engine, and format parsers are the
-[braccato](https://github.com/better-lyrics/braccato) repo, consumed here as exact-pinned
-`@braccato/core`, `@braccato/highlight`, and `@braccato/parsers`. Renderer behaviour, timing, and the
-lyrics CSS are **not** editable from this repo — change them upstream and bump the version.
-CONTRIBUTING.md has the `npm link` loop for working against a local checkout. Dependabot bumps on
-`*/braccato-*` branches auto-merge once Build and the quality workflow pass.
+## 8. Handoff
 
-## Content script worlds
+Entregue uma linha por decisão:
 
-`manifest.json` splits injection across MAIN and ISOLATED worlds at `document_start` and
-`document_end`. Which world a file runs in is a hard constraint on what it can touch, and importing
-`@/index` from anywhere re-executes the ISOLATED content script in the wrong context. Message across
-the boundary instead of reaching across it; `public/script.js` is the player bridge that publishes
-MAIN-world snapshots.
+| chave | EN | pt-BR escolhido | evidência (arquivo:linha ou plataforma) | alternativa rejeitada | motivo |
+| --- | --- | --- | --- | --- | --- |
 
-## Versioning
-
-Versions are 4-digit (`3.0.0.4`) in `package.json` and `manifest.json`, with a human-facing 3-digit
-`version_name`. `npm run update-version -- <version>` rewrites `package.json`, `manifest.json`,
-`src/options/options.html`, and `README.md` together — never edit them by hand. Releases run from the
-`release` workflow via `workflow_dispatch`; canary builds require a 4-digit version and set
-`RELEASE_TYPE=canary`.
-
-## Theme and styling work
-
-Read [STYLING-SKILL.md](STYLING-SKILL.md) first — it is the condensed, agent-facing CSS-variable
-reference. [STYLING.md](STYLING.md) is the exhaustive version and is excluded from Biome, so do not
-reformat it. Bundled themes live in `public/css/themes/`; `HDR.css` carries an opt-in theme-settings
-directive that the packaged-theme check verifies survives the build byte for byte.
-
-## Attribution for agent-authored PRs
-
-Any pull request opened by an AI agent must disclose it in the PR description, naming the model and
-the person it is acting for. Use this template, substituting both placeholders:
-
-> Opened by `<model name>` working on behalf of `@<github-handle>`.
-
-`<model name>` and `@<github-handle>` are placeholders, not literal text — fill in the model that
-actually wrote the change and the GitHub handle of the person it is acting for. Filled in, the line
-reads like this (the model and handle here are only an illustration):
-
-> Opened by Claude Opus 5.5 working on behalf of @octocat.
-
-Keep this line even when the human reviews and amends the work. That disclosure is the whole
-requirement — no generated-by footers or commit trailers are expected on top of it.
-
-The PR template carries an **Authorship** section holding this line and a human-authored
-alternative. Tick the box that applies and fill the line in; do not delete the section.
-
-Undisclosed agent-authored PRs are closed on sight, and unreviewed agent output from outside
-contributors is not accepted at all — see the policy in CONTRIBUTING.md.
+Sem a coluna de evidência preenchida, a decisão é considerada não fundamentada.
