@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-13T01:19:40.0053022-03:00",
+  "repos": {
+    "better-lyrics": {
+      "baseCommit": "cfe9b06ee4e068bc2c4b931463edd94edc9c0090",
+      "upstreamRef": "upstream/master",
+      "updatedAt": "2026-11-13T01:19:40.0053726-03:00",
+      "note": "Baseline fixada para o workflow single-repo"
+    }
+  }
+}
