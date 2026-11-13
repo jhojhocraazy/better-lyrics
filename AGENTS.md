@@ -1,3 +1,10 @@
+<!--
+  Seguranca: chaves de API (provedores de letras, TMDB/OMDb, servicos de video)
+  NUNCA devem ser hardcoded neste projeto. Elas sao injetadas exclusivamente pelo
+  usuario via localStorage, pelas configuracoes da interface visual. Nao adicione
+  chaves reais a arquivos versionados.
+-->
+
 # AGENTS.md — Diretriz local de localização: better-lyrics
 
 > **Herança obrigatória.** Toolchain, gates de CI, política de PR e convenções de código estão em
