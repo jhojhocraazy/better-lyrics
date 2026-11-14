@@ -1,0 +1,37 @@
+name: Crowdin Suggestions Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Probe approvals, suggestions and known IDs
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          function Probe([string]$label, [string]$uri) {
+            try {
+              $response = Invoke-WebRequest -Method Get -Uri $uri -Headers $headers
+              $body = $response.Content
+              Write-Output ("{0} status={1} bytes={2}" -f $label, [int]$response.StatusCode, $body.Length)
+              if ($body.Length -gt 3000) { $body = $body.Substring(0, 3000) }
+              Write-Output $body
+            } catch {
+              $code = 0
+              if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+              $detail = [string]$_.ErrorDetails.Message
+              Write-Output ("{0} status={1} body={2}" -f $label, $code, $detail)
+            }
+          }
+          Probe 'APPROVALS' "$base/projects/863186/approvals?fileId=23&languageId=pt-BR&limit=100"
+          Probe 'SUGGESTIONS' "$base/projects/863186/suggestions?fileId=23&languageId=pt-BR&limit=100"
+          foreach ($id in @('30974','30976','ccb8408a')) {
+            Probe "TRANSLATION_$id" "$base/projects/863186/translations/$id"
+          }
