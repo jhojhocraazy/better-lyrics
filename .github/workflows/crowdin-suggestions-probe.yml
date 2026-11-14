@@ -32,6 +32,27 @@ jobs:
           }
           Probe 'APPROVALS' "$base/projects/863186/approvals?fileId=23&languageId=pt-BR&limit=100"
           Probe 'SUGGESTIONS' "$base/projects/863186/suggestions?fileId=23&languageId=pt-BR&limit=100"
+          $all = [System.Collections.Generic.List[object]]::new()
+          $offset = 0
+          $limit = 100
+          do {
+            $page = Invoke-RestMethod -Uri "$base/projects/863186/translations?languageId=pt-BR&limit=$limit&offset=$offset" -Headers $headers
+            $batch = @($page.data)
+            foreach ($row in $batch) { $all.Add($row.data) }
+            $offset += $batch.Count
+          } while ($batch.Count -eq $limit)
+          Write-Output "SCAN_TOTAL $($all.Count)"
+          foreach ($t in $all) {
+            $raw = $t | ConvertTo-Json -Compress -Depth 10
+            if ($raw -match 'ccb8408a') {
+              $txt = [string]$t.text
+              if ($txt.Length -gt 120) { $txt = $txt.Substring(0,120) }
+              Write-Output ("SCAN_CCB id={0} user={1} createdAt={2} text={3}" -f $t.id, $t.userId, $t.createdAt, $txt)
+            }
+            if ($t.id -ge 30970 -and $t.id -le 30980) {
+              Write-Output ("SCAN_NEAR id={0} user={1} createdAt={2} len={3}" -f $t.id, $t.userId, $t.createdAt, ([string]$t.text).Length)
+            }
+          }
           foreach ($id in @('30974','30976','ccb8408a')) {
             Probe "TRANSLATION_$id" "$base/projects/863186/translations/$id"
           }
