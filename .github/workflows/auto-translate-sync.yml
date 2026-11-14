@@ -131,9 +131,12 @@ jobs:
           }
           $fileId = $source.data.id
           Write-Output "CROWDIN_SOURCE path=$($source.data.path) fileId=$fileId"
-          $storageHeaders = @{} + $headers
-          $storageHeaders['Crowdin-API-FileName'] = 'messages.json'
-          $storage = Invoke-RestMethod -Method Post -Uri "$base/storages" -Headers $storageHeaders -Form @{ file = Get-Item $file }
+          $fileSize = (Get-Item $file).Length
+          Write-Output "CROWDIN_FILE bytes=$fileSize"
+          $storageFile = Join-Path $env:RUNNER_TEMP 'crowdin-storage.json'
+          & 'C:\Windows\System32\curl.exe' --silent --show-error --fail-with-body -X POST "$base/storages" -H "Authorization: Bearer $($env:CROWDIN_API_TOKEN)" -H "Crowdin-API-FileName: messages.json" -F "file=@$file" -o $storageFile
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $storageFile) { Get-Content $storageFile }; throw "Crowdin storage falhou: exit $LASTEXITCODE" }
+          $storage = Get-Content $storageFile -Raw | ConvertFrom-Json
           $storageId = $storage.data.id
           $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR'; importEqSuggestions = $false; autoApproveImported = $false; translateHidden = $false } | ConvertTo-Json
           $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
