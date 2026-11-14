@@ -1,0 +1,61 @@
+name: Crowdin Export Audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: windows-latest
+    steps:
+      - name: Build and download Crowdin pt-BR export
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          $outDir = Join-Path $env:RUNNER_TEMP 'cloud'
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $build = Invoke-RestMethod -Method Post -Uri "$base/projects/863186/translations/builds" -Headers $headers -ContentType 'application/json' -Body '{}'
+          $buildId = $build.data.id
+          if (-not $buildId) { throw 'Build sem id' }
+          Write-Output "BUILD_ID $buildId"
+          $status = ''
+          for ($i = 0; $i -lt 120; $i++) {
+            $b = Invoke-RestMethod -Uri "$base/projects/863186/translations/builds/$buildId" -Headers $headers
+            $status = [string]$b.data.status
+            Write-Output "BUILD_STATUS $status"
+            if ($status -eq 'finished') { break }
+            if ($status -in @('failed','canceled')) { throw "Build status=$status" }
+            Start-Sleep -Seconds 5
+          }
+          if ($status -ne 'finished') { throw "Build nao terminou: $status" }
+          $zip = Join-Path $outDir 'export.zip'
+          Invoke-WebRequest -Uri "$base/projects/863186/translations/builds/$buildId/download" -Headers $headers -OutFile $zip
+          $bytes = [System.IO.File]::ReadAllBytes($zip)
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x4B) {
+            $body = [System.IO.File]::ReadAllText($zip)
+            Write-Output "DOWNLOAD_BODY $body"
+            $d = $body | ConvertFrom-Json
+            $url = [string]$d.data.url
+            if ([string]::IsNullOrWhiteSpace($url)) { throw 'Download sem URL assinada' }
+            Invoke-WebRequest -Uri $url -OutFile $zip
+          }
+          Write-Output ("ZIP_BYTES " + (Get-Item $zip).Length)
+          $extract = Join-Path $env:RUNNER_TEMP 'cloud-extract'
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          Get-ChildItem -Recurse -File $extract | ForEach-Object { Write-Output ("ZIP_ENTRY " + $_.FullName.Substring($extract.Length)) }
+          $json = Get-ChildItem -Recurse -File $extract -Filter 'messages.json' | Where-Object { $_.FullName -match 'pt[-_]BR' } | Select-Object -First 1
+          if (-not $json) { $json = Get-ChildItem -Recurse -File $extract -Filter 'messages.json' | Select-Object -First 1 }
+          if (-not $json) { throw 'messages.json nao encontrado no export' }
+          Copy-Item -LiteralPath $json.FullName -Destination (Join-Path $outDir 'messages.json') -Force
+          $hash = (Get-FileHash -LiteralPath (Join-Path $outDir 'messages.json') -Algorithm SHA256).Hash
+          Write-Output "CLOUD_FILE messages.json SHA256=$hash"
+      - name: Upload cloud export
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-export
+          path: ${{ runner.temp }}/cloud
