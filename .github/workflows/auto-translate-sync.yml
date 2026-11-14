@@ -127,11 +127,13 @@ jobs:
           $source = $files.data | Where-Object { $_.data.path -eq "/master/messages.json" } | Select-Object -First 1
           if (-not $source) {
             $paths = ($files.data | ForEach-Object { $_.data.path }) -join ', '
-            throw "Arquivo fonte _locales/en/messages.json nao encontrado. Paths: $paths"
+            throw "Arquivo fonte /master/messages.json nao encontrado. Paths: $paths"
           }
           $fileId = $source.data.id
           Write-Output "CROWDIN_SOURCE path=$($source.data.path) fileId=$fileId"
-          $storage = Invoke-RestMethod -Method Post -Uri "$base/storages" -Headers $headers -Form @{ file = Get-Item $file }
+          $storageHeaders = @{} + $headers
+          $storageHeaders['Crowdin-API-FileName'] = 'messages.json'
+          $storage = Invoke-RestMethod -Method Post -Uri "$base/storages" -Headers $storageHeaders -Form @{ file = Get-Item $file }
           $storageId = $storage.data.id
           $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR'; importEqSuggestions = $false; autoApproveImported = $false; translateHidden = $false } | ConvertTo-Json
           $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
