@@ -146,7 +146,7 @@ jobs:
           if ($noSource.Count -gt 0) {
             Write-Output ("CROWDIN_NO_SOURCE count={0} keys={1}" -f $noSource.Count, (($noSource | Select-Object -First 20) -join ','))
           }
-          $injected = 0; $skipped = 0
+          $injected = 0; $skipped = 0; $duplicates = 0
           $failed = [System.Collections.Generic.List[string]]::new()
           $statuses = @{}
           $processed = 0
@@ -173,7 +173,13 @@ jobs:
                 if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
                 if ($code -eq 429) { Start-Sleep -Seconds 10; continue }
                 $detail = [string]$_.ErrorDetails.Message
-                $failed.Add("$key status=$code $detail"); $done = $true
+                if ($code -eq 400 -and $detail -match 'Duplicate translation') {
+                  $duplicates++
+                  $statuses[$code] = 1 + [int]$statuses[$code]
+                  $done = $true
+                } else {
+                  $failed.Add("$key status=$code $detail"); $done = $true
+                }
               }
             }
             if (-not $done) { $failed.Add("$key retries esgotados") }
@@ -181,12 +187,12 @@ jobs:
             if (($processed % 50) -eq 0) { Write-Output "CROWDIN_PROGRESS $processed/$($keys.Count) injected=$injected failed=$($failed.Count)" }
           }
           $statusText = (($statuses.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Value)" }) -join ',')
-          Write-Output "CROWDIN_STRINGS_DONE total=$($keys.Count) no_source=$($noSource.Count) injected=$injected skipped=$skipped failed=$($failed.Count) statuses=$statusText"
+          Write-Output "CROWDIN_STRINGS_DONE total=$($keys.Count) no_source=$($noSource.Count) injected=$injected duplicates=$duplicates skipped=$skipped failed=$($failed.Count) statuses=$statusText"
           if ($failed.Count -gt 0) {
             $failed | Select-Object -First 10 | ForEach-Object { Write-Output "CROWDIN_FAILURE $_" }
             throw "Crowdin string-based falhou em $($failed.Count) chaves"
           }
-          Write-Output "CROWDIN_STRINGS_OK total=$($keys.Count) no_source=$($noSource.Count) injected=$injected language=pt-BR"
+          Write-Output "CROWDIN_STRINGS_OK total=$($keys.Count) no_source=$($noSource.Count) injected=$injected duplicates=$duplicates language=pt-BR"
       - name: Commit report and open pull request
         if: steps.delta.outputs.pending != '0'
         shell: pwsh
