@@ -145,8 +145,13 @@ jobs:
           if (-not $storageResponse.IsSuccessStatusCode) { Write-Output $storageBody; throw "Crowdin storage falhou: $([int]$storageResponse.StatusCode)" }
           $storage = $storageBody | ConvertFrom-Json
           $storageId = $storage.data.id
-          $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR'; importEqSuggestions = $false; autoApproveImported = $false; translateHidden = $false } | ConvertTo-Json
-          $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
+          $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR' } | ConvertTo-Json
+          try {
+            $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
+          } catch {
+            Write-Output "CROWDIN_TRANSLATION_ERROR $($_.ErrorDetails.Message)"
+            throw
+          }
           Write-Output "CROWDIN_UPLOAD_OK status=$($response.StatusCode) project=$projectId fileId=$fileId language=pt-BR"
           Write-Output $response.Content
       - name: Commit report and open pull request
