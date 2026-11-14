@@ -1,0 +1,67 @@
+name: Crowdin Forensic Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      delete_ids:
+        description: "IDs numéricos separados por vírgula; vazio = dry-run"
+        required: false
+        default: ""
+
+jobs:
+  cleanup:
+    runs-on: windows-latest
+    steps:
+      - name: Inspect or delete Crowdin translations
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+          DELETE_IDS: ${{ inputs.delete_ids }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          $all = [System.Collections.Generic.List[object]]::new()
+          $offset = 0
+          $limit = 100
+          do {
+            $page = Invoke-RestMethod -Uri "$base/projects/863186/translations?languageId=pt-BR&limit=$limit&offset=$offset" -Headers $headers
+            $batch = @($page.data)
+            foreach ($row in $batch) { $all.Add($row.data) }
+            $offset += $batch.Count
+          } while ($batch.Count -eq $limit)
+          Write-Output "CROWDIN_TOTAL $($all.Count)"
+          $matches = [System.Collections.Generic.List[object]]::new()
+          foreach ($t in $all) {
+            $text = [string]$t.text
+            $isJson = $text -match '(?i)\.json|messages\.json'
+            $isHash = $text -match '^[0-9a-fA-F]{32,64}$'
+            if ($isJson -or $isHash) {
+              $matches.Add($t)
+              $preview = $text -replace '\s+', ' '
+              if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) }
+              Write-Output ("CROWDIN_MATCH id={0} userId={1} createdAt={2} stringId={3} len={4} text={5}" -f $t.id, $t.userId, $t.createdAt, $t.stringId, $text.Length, $preview)
+            }
+          }
+          Write-Output "CROWDIN_MATCHES $($matches.Count)"
+          if ([string]::IsNullOrWhiteSpace([string]$env:DELETE_IDS)) {
+            Write-Output 'CROWDIN_MODE dry-run'
+            return
+          }
+          $ids = @([string]$env:DELETE_IDS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' })
+          Write-Output "CROWDIN_DELETE_IDS $($ids -join ',')"
+          $errors = 0
+          foreach ($id in $ids) {
+            try {
+              $response = Invoke-WebRequest -Method Delete -Uri "$base/projects/863186/translations/$id" -Headers $headers
+              Write-Output ("CROWDIN_DELETE id={0} status={1}" -f $id, [int]$response.StatusCode)
+            } catch {
+              $code = 0
+              if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+              Write-Output ("CROWDIN_DELETE_ERROR id={0} status={1} {2}" -f $id, $code, [string]$_.ErrorDetails.Message)
+              $errors++
+            }
+          }
+          if ($errors -gt 0) { throw "Falhas de delecao: $errors" }
+          Write-Output 'CROWDIN_DELETE_ALL_OK'
