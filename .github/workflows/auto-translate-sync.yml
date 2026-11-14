@@ -110,6 +110,32 @@ jobs:
           $lines.Add("> Revise as sugestões e aplique apenas as chaves listadas, seguindo o AGENTS.md local. Este PR não altera os catálogos automaticamente.")
           $lines -join "`n" | Set-Content -Path ".github\i18n-delta.md" -Encoding utf8
 
+      - name: Upload pt-BR to Crowdin
+        if: github.event_name == 'workflow_dispatch' || steps.delta.outputs.pending != '0'
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          $projectId = 863186
+          $file = Join-Path $env:GITHUB_WORKSPACE '_locales\pt_BR\messages.json'
+          if (-not (Test-Path $file)) { throw "Arquivo nao encontrado: $file" }
+          $files = Invoke-RestMethod -Uri "$base/projects/$projectId/files?recursion=1&limit=500" -Headers $headers
+          $source = $files.data | Where-Object { $_.data.path -like '*_locales/en/messages.json' } | Select-Object -First 1
+          if (-not $source) {
+            $paths = ($files.data | ForEach-Object { $_.data.path }) -join ', '
+            throw "Arquivo fonte _locales/en/messages.json nao encontrado. Paths: $paths"
+          }
+          $fileId = $source.data.id
+          $storage = Invoke-RestMethod -Method Post -Uri "$base/storages" -Headers $headers -Form @{ file = Get-Item $file }
+          $storageId = $storage.data.id
+          $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR'; importEqSuggestions = $false; autoApproveImported = $false; translateHidden = $false } | ConvertTo-Json
+          $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
+          Write-Output "CROWDIN_UPLOAD_OK status=$($response.StatusCode) project=$projectId fileId=$fileId language=pt-BR"
+          Write-Output $response.Content
       - name: Commit report and open pull request
         if: steps.delta.outputs.pending != '0'
         shell: pwsh
