@@ -1,0 +1,274 @@
+name: Auto Translate Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-translate-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    env:
+      REPO_NAME: better-lyrics
+      UPSTREAM_URL: https://github.com/better-lyrics/better-lyrics.git
+      UPSTREAM_BRANCH: master
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure upstream
+        shell: pwsh
+        run: |
+          git remote remove upstream 2>$null
+          git remote add upstream $env:UPSTREAM_URL
+          git fetch upstream $env:UPSTREAM_BRANCH --no-tags
+
+      - name: Prepare single-repo workspace
+        shell: pwsh
+        run: |
+          $parent = Split-Path $env:GITHUB_WORKSPACE -Parent
+          $script = Join-Path $env:GITHUB_WORKSPACE ".github\scripts\sync-check.ps1"
+          Copy-Item -Path $script -Destination (Join-Path $parent "sync-check.ps1") -Force
+          $baseline = Join-Path $env:GITHUB_WORKSPACE ".github\scripts\baseline.json"
+          Copy-Item -Path $baseline -Destination (Join-Path $parent ".sync-baseline.json") -Force
+          Write-Output "workspace=$parent repo=$env:REPO_NAME"
+
+      - name: Detect delta
+        id: delta
+        shell: pwsh
+        run: |
+          $parent = Split-Path $env:GITHUB_WORKSPACE -Parent
+          $jsonPath = Join-Path $parent "delta.json"
+          & pwsh -NoProfile -File (Join-Path $parent "sync-check.ps1") -Root $parent -Repo $env:REPO_NAME -NoFetch -Json | Set-Content -Path $jsonPath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw "sync-check.ps1 falhou com exit $LASTEXITCODE" }
+          $delta = Get-Content -Path $jsonPath -Raw | ConvertFrom-Json
+          $pending = [int]$delta.summary.pendingKeys
+          Write-Output "pending=$pending"
+          "pending=$pending" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if ($pending -gt 0) {
+            Copy-Item -Path $jsonPath -Destination (Join-Path $env:GITHUB_WORKSPACE ".github\i18n-delta.json") -Force
+          }
+
+      - name: Build delta report
+        if: steps.delta.outputs.pending != '0'
+        shell: pwsh
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          $json = Get-Content -Path ".github\i18n-delta.json" -Raw
+          $delta = $json | ConvertFrom-Json
+          $agentsPath = if (Test-Path "AGENTS.md") { "AGENTS.md" } elseif (Test-Path ".github\scripts\AGENTS.md") { ".github\scripts\AGENTS.md" } else { "" }
+          $agents = if ($agentsPath) { Get-Content -Path $agentsPath -Raw } else { "AGENTS.md local nao encontrado; use as regras gerais de localizacao do repositorio." }
+          $lines = New-Object System.Collections.Generic.List[string]
+          $lines.Add("# Delta upstream — $env:REPO_NAME")
+          $lines.Add("")
+          $lines.Add("- Gerado em: $(Get-Date -Format o)")
+          $lines.Add("- Base local: $($delta.repos[0].baseCommit)")
+          $lines.Add("- Upstream: $($delta.repos[0].upstreamRef) / $($delta.repos[0].upstreamCommit)")
+          $lines.Add("- Chaves pendentes: $($delta.summary.pendingKeys)")
+          $lines.Add("")
+          $lines.Add("## Chaves detectadas")
+          $lines.Add("")
+          $lines.Add('```json')
+          $lines.Add($json)
+          $lines.Add('```')
+          $lines.Add("")
+          $lines.Add("## Sugestões DeepSeek")
+          $lines.Add("")
+          if (-not [string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
+            try {
+              $body = @{
+                model = "deepseek-chat"
+                temperature = 0.2
+                messages = @(
+                  @{ role = "system"; content = "Você é o agente de localização pt-BR deste repositório. Siga estritamente o AGENTS.md. Traduza apenas as chaves listadas, preserve placeholders, ordem e limites. Responda em Markdown com a tabela: chave | EN | sugestão pt-BR | justificativa." },
+                  @{ role = "user"; content = "AGENTS.md:`n$agents`n`nDelta JSON:`n$json" }
+                )
+              } | ConvertTo-Json -Depth 10
+              $response = Invoke-RestMethod -Uri "https://api.deepseek.com/chat/completions" -Method Post -Headers @{ Authorization = "Bearer $env:DEEPSEEK_API_KEY" } -ContentType "application/json" -Body $body -TimeoutSec 180
+              $lines.Add($response.choices[0].message.content)
+            }
+            catch {
+              $lines.Add("> Falha ao consultar a API DeepSeek: $($_.Exception.Message)")
+            }
+          }
+          else {
+            $lines.Add("> Secret DEEPSEEK_API_KEY não configurada; relatório gerado sem sugestões.")
+          }
+          $lines.Add("")
+          $lines.Add("> Revise as sugestões e aplique apenas as chaves listadas, seguindo o AGENTS.md local. Este PR não altera os catálogos automaticamente.")
+          $lines -join "`n" | Set-Content -Path ".github\i18n-delta.md" -Encoding utf8
+
+      - name: Upload pt-BR strings to Crowdin
+        if: github.event_name == 'workflow_dispatch' || steps.delta.outputs.pending != '0'
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $projectId = 863186
+          $file = Join-Path $env:GITHUB_WORKSPACE '_locales\pt_BR\messages.json'
+          if (-not (Test-Path $file)) { throw "Arquivo nao encontrado: $file" }
+          $pt = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
+          $keys = @($pt.Keys)
+          if ($keys.Count -eq 0) { throw 'Catalogo pt-BR vazio' }
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          $strings = [System.Collections.Generic.List[object]]::new()
+          $offset = 0
+          $limit = 500
+          do {
+            $page = Invoke-RestMethod -Uri "$base/projects/$projectId/strings?limit=$limit&offset=$offset" -Headers $headers
+            $batch = @($page.data)
+            foreach ($row in $batch) { $strings.Add($row.data) }
+            $offset += $batch.Count
+          } while ($batch.Count -eq $limit)
+          if ($strings.Count -eq 0) { throw 'Projeto Crowdin sem strings; modelo string-based indisponivel' }
+          $map = @{}
+          foreach ($s in $strings) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$s.identifier)) { $map[[string]$s.identifier] = [int64]$s.id }
+          }
+          $sample = (($strings | Select-Object -First 5 | ForEach-Object { "$($_.id):$($_.identifier)" }) -join ';')
+          Write-Output "CROWDIN_STRINGS_LOADED count=$($strings.Count) sample=$sample"
+          $missing = @($keys | Where-Object { -not $map.ContainsKey([string]$_) })
+          if ($missing.Count -gt 0) {
+            Write-Output ("CROWDIN_MISSING count={0} keys={1}" -f $missing.Count, (($missing | Select-Object -First 20) -join ','))
+            throw "Strings sem identificador no Crowdin: $($missing.Count)"
+          }
+          $injected = 0; $skipped = 0
+          $failed = [System.Collections.Generic.List[string]]::new()
+          $statuses = @{}
+          $processed = 0
+          foreach ($key in $keys) {
+            $text = [string]$pt[$key].message
+            if ([string]::IsNullOrWhiteSpace($text)) { $skipped++; $processed++; continue }
+            $stringId = [int64]$map[[string]$key]
+            $payload = @{ stringId = $stringId; languageId = 'pt-BR'; text = $text } | ConvertTo-Json -Compress
+            $done = $false
+            for ($attempt = 1; $attempt -le 3 -and -not $done; $attempt++) {
+              try {
+                $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $payload
+                $code = [int]$response.StatusCode
+                if ($code -in 200,201) {
+                  $injected++
+                  $statuses[$code] = 1 + [int]$statuses[$code]
+                  $done = $true
+                } else {
+                  $failed.Add("$key status=$code"); $done = $true
+                }
+              } catch {
+                $code = 0
+                if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+                if ($code -eq 429) { Start-Sleep -Seconds 10; continue }
+                $detail = [string]$_.ErrorDetails.Message
+                $failed.Add("$key status=$code $detail"); $done = $true
+              }
+            }
+            if (-not $done) { $failed.Add("$key retries esgotados") }
+            $processed++
+            if (($processed % 50) -eq 0) { Write-Output "CROWDIN_PROGRESS $processed/$($keys.Count) injected=$injected failed=$($failed.Count)" }
+          }
+          $statusText = (($statuses.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Value)" }) -join ',')
+          Write-Output "CROWDIN_STRINGS_DONE total=$($keys.Count) injected=$injected skipped=$skipped failed=$($failed.Count) statuses=$statusText"
+          if ($failed.Count -gt 0) {
+            $failed | Select-Object -First 10 | ForEach-Object { Write-Output "CROWDIN_FAILURE $_" }
+            throw "Crowdin string-based falhou em $($failed.Count) chaves"
+          }
+          Write-Output "CROWDIN_STRINGS_OK total=$($keys.Count) injected=$injected language=pt-BR"
+      - name: Commit report and open pull request
+        if: steps.delta.outputs.pending != '0'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $branch = "i18n/upstream-delta"
+          $repo = $env:GITHUB_REPOSITORY
+          git checkout -B $branch
+          git add .github/i18n-delta.md .github/i18n-delta.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { Write-Output "Sem mudancas para commit"; exit 0 }
+          git commit -m "i18n: upstream delta report ($env:REPO_NAME)"
+          git push --force origin "HEAD:refs/heads/$branch"
+          $existing = gh pr list --repo $repo --head $branch --json number --jq ".[0].number" 2>$null
+          $body = @'
+          ## Summary
+          
+          Automated upstream delta report for better-lyrics.
+          
+          ## PR type
+          
+          - [ ] Reproducible bug fix
+          - [ ] UI glitch/bug fix
+          - [ ] Behavior bug/regression fix
+          - [x] Small maintenance only, with no UI or behavior change
+          - [ ] Docs accuracy fix
+          - [ ] Translation/localization only
+          - [ ] Approved larger or directional change
+          
+          ## Why
+          
+          Upstream added new translation keys; this PR records the delta and AI suggestions for review before translation.
+          
+          ## Issue or approval
+          
+          No linked issue: automated upstream delta report, no code change.
+          
+          ## UI / behavior impact
+          
+          - [x] No UI change
+          - [x] No behavior change
+          - [ ] UI changed only to fix a documented glitch/bug
+          - [ ] Behavior changed only to fix a documented bug/regression
+          - [ ] UI change has explicit maintainer approval
+          - [ ] Behavior change has explicit maintainer approval
+          
+          ## Policy check
+          
+          - [x] I have read and understood `CONTRIBUTING.md`.
+          - [x] This PR is small, focused, and limited to one problem.
+          - [x] This PR is not cosmetic-only.
+          - [x] Any UI change fixes a linked glitch/bug and includes visual proof, or this PR has no UI change.
+          - [x] Any behavior change fixes a linked bug/regression or has explicit approval, or this PR has no behavior change.
+          - [x] This PR does not bundle unrelated refactors, cleanups, formatting, or drive-by changes.
+          - [x] This PR does not add dependencies, architecture changes, migrations, or product-direction changes without explicit approval.
+          - [x] I listed the testing performed below.
+          
+          ## Scope boundaries
+          
+          Only `.github/i18n-delta.md` and `.github/i18n-delta.json` are added. No locale, source, or build file is modified.
+          
+          ## Testing
+          
+          `sync-check.ps1` ran on `windows-latest` and generated the delta; the JSON parsed successfully. No runtime test is needed because no code changes.
+          
+          ## Screenshots / Video
+          
+          Not a UI change.
+          
+          ## Breaking changes
+          
+          None.
+          
+          ## Linked issues
+          
+          No linked issue - automated translation delta report.
+          '@
+          if ($existing) {
+            gh pr edit --repo $repo $existing --title "i18n: upstream delta ($env:REPO_NAME)" --body $body
+          } else {
+            gh pr create --repo $repo --base $env:GITHUB_REF_NAME --head $branch --title "i18n: upstream delta ($env:REPO_NAME)" --body $body
+          }
