@@ -1,0 +1,57 @@
+name: Crowdin Purge Suggestions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  purge:
+    runs-on: windows-latest
+    steps:
+      - name: Purge three old Crowdin suggestions with guards
+        shell: pwsh
+        env:
+          CROWDIN_API_TOKEN: ${{ secrets.CROWDIN_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CROWDIN_API_TOKEN)) { throw 'CROWDIN_API_TOKEN ausente' }
+          $base = 'https://api.crowdin.com/api/v2'
+          $headers = @{ Authorization = "Bearer $($env:CROWDIN_API_TOKEN)"; Accept = 'application/json' }
+          $targets = @(30974, 30976, 30978)
+          $ok = 0
+          foreach ($id in $targets) {
+            try {
+              $pre = Invoke-WebRequest -Method Get -Uri "$base/projects/863186/translations/$id" -Headers $headers
+            } catch {
+              $code = 0
+              if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+              if ($code -eq 404) {
+                Write-Output ("PURGE_ALREADY_DELETED id={0}" -f $id)
+                $ok++
+                continue
+              }
+              throw "Preflight $id status=$code"
+            }
+            $preData = $pre.Content | ConvertFrom-Json
+            $url = [string]$preData.data.url
+            Write-Output ("PURGE_PRE id={0} status={1} createdAt={2} url={3}" -f $id, [int]$pre.StatusCode, $preData.data.createdAt, $url.Substring(0, [Math]::Min(160, $url.Length)))
+            if ($url -notmatch 'suggestions/original') { throw "Alvo $id nao e suggestion/original" }
+            $del = Invoke-WebRequest -Method Delete -Uri "$base/projects/863186/translations/$id" -Headers $headers
+            Write-Output ("PURGE_DELETE id={0} status={1}" -f $id, [int]$del.StatusCode)
+            if ([int]$del.StatusCode -ne 204) { throw "DELETE $id retornou $([int]$del.StatusCode), esperado 204" }
+            try {
+              $after = Invoke-WebRequest -Method Get -Uri "$base/projects/863186/translations/$id" -Headers $headers
+              throw "ID $id ainda responde $([int]$after.StatusCode)"
+            } catch {
+              $code = 0
+              if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+              if ($code -eq 404) {
+                Write-Output ("PURGE_VERIFIED_DELETED id={0} status=404" -f $id)
+                $ok++
+              } else {
+                throw "Verificacao $id status=$code"
+              }
+            }
+          }
+          Write-Output ("PURGE_DONE ok={0}/{1}" -f $ok, $targets.Count)
+          if ($ok -ne $targets.Count) { throw "Purga incompleta: $ok/$($targets.Count)" }
+          Write-Output 'PURGE_ALL_OK'
