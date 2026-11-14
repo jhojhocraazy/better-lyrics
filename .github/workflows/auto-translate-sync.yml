@@ -133,10 +133,19 @@ jobs:
           Write-Output "CROWDIN_SOURCE path=$($source.data.path) fileId=$fileId"
           $fileSize = (Get-Item $file).Length
           Write-Output "CROWDIN_FILE bytes=$fileSize"
-          $storageFile = Join-Path $env:RUNNER_TEMP 'crowdin-storage.json'
-          & 'C:\Windows\System32\curl.exe' --silent --show-error --fail-with-body -X POST "$base/storages" -H "Authorization: Bearer $($env:CROWDIN_API_TOKEN)" -H "Crowdin-API-FileName: messages.json" -F "file=@$file" -o $storageFile
-          if ($LASTEXITCODE -ne 0) { if (Test-Path $storageFile) { Get-Content $storageFile }; throw "Crowdin storage falhou: exit $LASTEXITCODE" }
-          $storage = Get-Content $storageFile -Raw | ConvertFrom-Json
+          $client = [System.Net.Http.HttpClient]::new()
+          $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $env:CROWDIN_API_TOKEN)
+          $client.DefaultRequestHeaders.Add('Crowdin-API-FileName', 'messages.json')
+          $multipart = [System.Net.Http.MultipartFormDataContent]::new()
+          $bytes = [System.IO.File]::ReadAllBytes($file)
+          $fileContent = [System.Net.Http.ByteArrayContent]::new($bytes)
+          $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/json')
+          $multipart.Add($fileContent, 'file', 'messages.json')
+          $storageResponse = $client.PostAsync("$base/storages", $multipart).GetAwaiter().GetResult()
+          $storageBody = $storageResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+          Write-Output "CROWDIN_STORAGE status=$([int]$storageResponse.StatusCode)"
+          if (-not $storageResponse.IsSuccessStatusCode) { Write-Output $storageBody; throw "Crowdin storage falhou: $([int]$storageResponse.StatusCode)" }
+          $storage = $storageBody | ConvertFrom-Json
           $storageId = $storage.data.id
           $body = @{ storageId = $storageId; fileId = $fileId; languageId = 'pt-BR'; importEqSuggestions = $false; autoApproveImported = $false; translateHidden = $false } | ConvertTo-Json
           $response = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/translations" -Headers $headers -ContentType 'application/json' -Body $body
