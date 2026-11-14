@@ -35,9 +35,10 @@ jobs:
           $found = [System.Collections.Generic.List[object]]::new()
           foreach ($t in $all) {
             $text = [string]$t.text
-            $isJson = $text -match '(?i)\.json|messages\.json'
+            $isJson = $text -match '(?i)\.json|messages\.json|"message"\s*:|^\s*\{'
             $isHash = $text -match '^[0-9a-fA-F]{32,64}$'
-            if ($isJson -or $isHash) {
+            $isLong = $text.Length -gt 400
+            if ($isJson -or $isHash -or $isLong) {
               $found.Add($t)
               $preview = $text -replace '\s+', ' '
               if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) }
