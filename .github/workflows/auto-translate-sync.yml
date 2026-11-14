@@ -136,12 +136,10 @@ jobs:
           $client = [System.Net.Http.HttpClient]::new()
           $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $env:CROWDIN_API_TOKEN)
           $client.DefaultRequestHeaders.Add('Crowdin-API-FileName', 'messages.json')
-          $multipart = [System.Net.Http.MultipartFormDataContent]::new()
           $bytes = [System.IO.File]::ReadAllBytes($file)
           $fileContent = [System.Net.Http.ByteArrayContent]::new($bytes)
-          $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/json')
-          $multipart.Add($fileContent, 'file', 'messages.json')
-          $storageResponse = $client.PostAsync("$base/storages", $multipart).GetAwaiter().GetResult()
+          $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')
+          $storageResponse = $client.PostAsync("$base/storages", $fileContent).GetAwaiter().GetResult()
           $storageBody = $storageResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
           Write-Output "CROWDIN_STORAGE status=$([int]$storageResponse.StatusCode)"
           if (-not $storageResponse.IsSuccessStatusCode) { Write-Output $storageBody; throw "Crowdin storage falhou: $([int]$storageResponse.StatusCode)" }
