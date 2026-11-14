@@ -142,10 +142,38 @@ jobs:
           }
           $sample = (($strings | Select-Object -First 5 | ForEach-Object { "$($_.id):$($_.identifier)" }) -join ';')
           Write-Output "CROWDIN_STRINGS_LOADED count=$($strings.Count) sample=$sample"
+          $created = 0
           $missing = @($keys | Where-Object { -not $map.ContainsKey([string]$_) })
           if ($missing.Count -gt 0) {
             Write-Output ("CROWDIN_MISSING count={0} keys={1}" -f $missing.Count, (($missing | Select-Object -First 20) -join ','))
-            throw "Strings sem identificador no Crowdin: $($missing.Count)"
+            $enPath = Join-Path $env:GITHUB_WORKSPACE '_locales\en\messages.json'
+            if (-not (Test-Path $enPath)) { throw "EN nao encontrado: $enPath" }
+            $en = Get-Content -LiteralPath $enPath -Raw | ConvertFrom-Json -AsHashtable
+            foreach ($key in $missing) {
+              if (-not $en.ContainsKey($key)) { throw "Chave sem EN: $key" }
+              $enText = [string]$en[$key].message
+              $createPayload = @{ text = $enText; identifier = [string]$key; fileId = 23 } | ConvertTo-Json -Compress
+              try {
+                $createResponse = Invoke-WebRequest -Method Post -Uri "$base/projects/$projectId/strings" -Headers $headers -ContentType 'application/json' -Body $createPayload
+              } catch {
+                $code = 0
+                if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+                $detail = [string]$_.ErrorDetails.Message
+                Write-Output "CROWDIN_CREATE_ERROR key=$key status=$code $detail"
+                throw "Falha ao criar source string: $key"
+              }
+              $createCode = [int]$createResponse.StatusCode
+              if ($createCode -notin 200,201) { Write-Output $createResponse.Content; throw "Create string $key status=$createCode" }
+              $createdObj = $createResponse.Content | ConvertFrom-Json
+              $newId = [int64]$createdObj.data.id
+              if ($newId -le 0) { throw "ID invalido para $key" }
+              $map[[string]$key] = $newId
+              $created++
+              Write-Output "CROWDIN_CREATED key=$key stringId=$newId"
+            }
+            Write-Output "CROWDIN_CREATED_TOTAL $created"
+            $missing = @($keys | Where-Object { -not $map.ContainsKey([string]$_) })
+            if ($missing.Count -gt 0) { throw "Strings ainda sem identificador: $($missing.Count)" }
           }
           $injected = 0; $skipped = 0
           $failed = [System.Collections.Generic.List[string]]::new()
@@ -181,12 +209,12 @@ jobs:
             if (($processed % 50) -eq 0) { Write-Output "CROWDIN_PROGRESS $processed/$($keys.Count) injected=$injected failed=$($failed.Count)" }
           }
           $statusText = (($statuses.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Value)" }) -join ',')
-          Write-Output "CROWDIN_STRINGS_DONE total=$($keys.Count) injected=$injected skipped=$skipped failed=$($failed.Count) statuses=$statusText"
+          Write-Output "CROWDIN_STRINGS_DONE total=$($keys.Count) created=$created injected=$injected skipped=$skipped failed=$($failed.Count) statuses=$statusText"
           if ($failed.Count -gt 0) {
             $failed | Select-Object -First 10 | ForEach-Object { Write-Output "CROWDIN_FAILURE $_" }
             throw "Crowdin string-based falhou em $($failed.Count) chaves"
           }
-          Write-Output "CROWDIN_STRINGS_OK total=$($keys.Count) injected=$injected language=pt-BR"
+          Write-Output "CROWDIN_STRINGS_OK total=$($keys.Count) created=$created injected=$injected language=pt-BR"
       - name: Commit report and open pull request
         if: steps.delta.outputs.pending != '0'
         shell: pwsh
